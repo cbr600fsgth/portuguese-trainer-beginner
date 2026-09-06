@@ -445,9 +445,11 @@ for (let d = 0; d < 45; d++) {
   });
 }
 
-check(`150フレーズが5枚/日で30日で投入し終わる（実測 ${introducedBy}）`, () => {
+check(`全${phrases.length}フレーズが5枚/日で投入し終わる（実測 ${introducedBy}）`, () => {
   assert.equal(Object.keys(cards).length, phrases.length);
-  assert.equal(introducedBy, '2030-05-04');
+  // ビギナー版は10フレーズしかないため2日（NEW_PER_DAY=5枚 x 2日）で投入完了する。
+  // 本家(150フレーズ)の想定値2030-05-04とは異なるのが正しい
+  assert.equal(introducedBy, '2030-04-06');
 });
 
 check('1日の出題枚数が常に35枚以下（復習30 + 新規5）', () => {
@@ -456,7 +458,7 @@ check('1日の出題枚数が常に35枚以下（復習30 + 新規5）', () => {
   });
 });
 
-check('スイープ期の10日で全150フレーズが最低1回出題される', () => {
+check(`スイープ期の10日で全${phrases.length}フレーズが最低1回出題される`, () => {
   const sweep = log.filter((l) => l.mode === 'sweep');
   assert.equal(sweep.length, 10);
   const seen = new Set(sweep.flatMap((l) => l.seen));
@@ -470,21 +472,14 @@ check('スイープ期の1日の出題が25枚以下', () => {
     .forEach((l) => assert.ok(l.shown <= srs.SWEEP_CAP, `${l.day} が ${l.shown}枚`));
 });
 
-// 繰り越しはゼロにはならない。150枚を1日30枚で回す以上、詰まる日は出る。
-// 重要なのは「際限なく積み上がらないこと」と「未消化のカードもスイープで必ず出ること」。
-// 後者は上の網羅テストで確認済み。
-check('繰り越しが際限なく積み上がらない', () => {
+// 本家(150枚)では1日30枚の復習上限を超えて繰り越しが発生するが、ビギナー版は
+// phrases.length(10) < REVIEW_CAP(30) のため、そもそも繰り越しが発生し得ない。
+// ここでは「発生しない」こと自体を積極的に確認する（本家の「際限なく積み上がらない」
+// テストとは狙いが異なる）。
+check('デッキがREVIEW_CAPより小さいため繰り越しが発生しない', () => {
   const study = log.filter((l) => l.mode === 'study');
   const worst = Math.max(...study.map((l) => l.overflow));
-  assert.ok(worst <= 40, `繰り越しの最大が ${worst}枚。上限30枚に対して多すぎる`);
-
-  // 単調増加ではなく、途中で必ず減る日があること
-  const tail = study.slice(-10);
-  const clears = tail.filter((l, i) => i > 0 && l.overflow < tail[i - 1].overflow);
-  assert.ok(
-    clears.length > 0,
-    `最後の10日で繰り越しが一度も減っていない: ${tail.map((l) => l.overflow).join(',')}`
-  );
+  assert.equal(worst, 0, `繰り越しの最大が ${worst}枚。0枚のはず`);
 });
 
 console.log('\n45日通し実行（学習開始日から・毎日さらに再挑戦を2回ずつ実施した場合）');
@@ -541,7 +536,7 @@ for (let d = 0; d < 45; d++) {
 
 check(`再挑戦しても新規の投入ペースは変わらない（実測 ${rIntroducedBy}）`, () => {
   assert.equal(Object.keys(rcards).length, phrases.length);
-  assert.equal(rIntroducedBy, '2030-05-04');
+  assert.equal(rIntroducedBy, '2030-04-06');
 });
 
 check('再挑戦しても必須セッションは35枚以下', () => {
@@ -550,7 +545,7 @@ check('再挑戦しても必須セッションは35枚以下', () => {
   });
 });
 
-check('再挑戦しても最終スイープで全150フレーズが出題される', () => {
+check(`再挑戦しても最終スイープで全${phrases.length}フレーズが出題される`, () => {
   const seen = new Set(rlog.filter((l) => l.mode === 'sweep').flatMap((l) => l.seen));
   const missing = phrases.filter((p) => !seen.has(p.id)).map((p) => p.id);
   assert.deepEqual(missing, [], `未出題: ${missing.join(', ')}`);

@@ -18,6 +18,23 @@ function normLang(l) {
   return (l || '').replace('_', '-');
 }
 
+// 話者は妻(女性)固定のため、声も女性を優先する。
+// Web Speech API の SpeechSynthesisVoice には性別を示すプロパティが無く
+// （持つのは default/lang/localService/name/voiceURI の5つのみ）、名前から推測するしかない。
+// 'joana' はiOS/macOSのpt-PT標準音声（実機のAVSpeechSynthesisVoice一覧で確認済み、女性名）。
+// 'female' は他プラットフォームが名前に性別を明示するケースの保険。
+// 該当が無ければ何も絞らず既存どおり先頭の音声を使う（誤って音声ゼロにはしない）。
+const FEMALE_VOICE_HINTS = ['joana', 'female'];
+
+function isLikelyFemale(v) {
+  const name = (v.name || '').toLowerCase();
+  return FEMALE_VOICE_HINTS.some((hint) => name.includes(hint));
+}
+
+function pickBest(candidates) {
+  return candidates.find(isLikelyFemale) || candidates[0];
+}
+
 function pickVoice() {
   if (!synth) {
     voiceStatus = 'unsupported';
@@ -27,15 +44,15 @@ function pickVoice() {
   if (!voices || voices.length === 0) return; // まだ読み込まれていない
   voicesLoaded = true;
 
-  const ptPT = voices.find((v) => normLang(v.lang) === 'pt-PT');
-  if (ptPT) {
-    voice = ptPT;
+  const ptPT = voices.filter((v) => normLang(v.lang) === 'pt-PT');
+  if (ptPT.length > 0) {
+    voice = pickBest(ptPT);
     voiceStatus = 'ptpt';
     return;
   }
-  const ptAny = voices.find((v) => normLang(v.lang).startsWith('pt'));
-  if (ptAny) {
-    voice = ptAny;
+  const ptAny = voices.filter((v) => normLang(v.lang).startsWith('pt'));
+  if (ptAny.length > 0) {
+    voice = pickBest(ptAny);
     voiceStatus = 'ptbr';
     return;
   }
