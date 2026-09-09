@@ -1,20 +1,19 @@
 // localStorage の読み書き。iOSのPWAは長期未使用でストレージが破棄されうるため
 // エクスポート/インポートを必ず用意する。
-
+//
+// 出題は毎回全フレーズなので、カードごとの状態（箱・期限）は保存しない。
+// 残すのは連続日数などのセッション記録だけ。
+//
 // キー接頭辞 ptb. はportuguese-trainer本家（pt.）との名前空間分離のため。
 // GitHub Pagesはprojectサイトのpathが違ってもoriginは同じ(cbr600fsgth.github.io)で
 // localStorageはorigin単位なので、接頭辞を分けないと同じブラウザで両アプリを開いたときに
-// 進捗データが混線する。
-const CARDS_KEY = 'ptb.cards';
+// 記録が混線する。
 const META_KEY = 'ptb.meta';
-// 出発日はここだけに持つ。ソースには入れない（公開リポジトリに旅行時期を残さないため）
-const TRIP_KEY = 'ptb.trip';
 
 const DEFAULT_META = {
   streak: 0,
   lastDone: null,      // 最後にセッションを完了した日 'YYYY-MM-DD'
   totalSessions: 0,
-  modeOverride: null,  // 'study' | 'sweep' | 'trip' | null（nullなら日付で自動判定）
 };
 
 function read(key, fallback) {
@@ -38,29 +37,12 @@ function write(key, value) {
   }
 }
 
-export function loadCards() {
-  return read(CARDS_KEY, {});
-}
-
-export function saveCards(cards) {
-  return write(CARDS_KEY, cards);
-}
-
 export function loadMeta() {
   return { ...DEFAULT_META, ...read(META_KEY, {}) };
 }
 
 export function saveMeta(meta) {
   return write(META_KEY, meta);
-}
-
-/** { departure: 'YYYY-MM-DD' } または未設定なら null */
-export function loadTrip() {
-  return read(TRIP_KEY, null);
-}
-
-export function saveTrip(trip) {
-  return write(TRIP_KEY, trip);
 }
 
 /** セッション完了を記録し、更新後のmetaを返す。同じ日に2回完了してもストリークは増えない */
@@ -82,11 +64,9 @@ export function recordSession(meta, today, yesterday) {
 export function exportJSON() {
   return JSON.stringify(
     {
-      version: 2,
+      version: 3,
       exportedAt: new Date().toISOString(),
-      cards: loadCards(),
       meta: loadMeta(),
-      trip: loadTrip(),
     },
     null,
     2
@@ -96,22 +76,13 @@ export function exportJSON() {
 /** 成功したら true。形式が違えば例外を投げる */
 export function importJSON(text) {
   const data = JSON.parse(text);
-  if (!data || typeof data.cards !== 'object' || data.cards === null) {
-    throw new Error('cards が見つかりません。このアプリのエクスポートファイルではありません');
+  if (!data || typeof data.meta !== 'object' || data.meta === null) {
+    throw new Error('meta が見つかりません。このアプリのエクスポートファイルではありません');
   }
-  saveCards(data.cards);
-  if (data.meta) saveMeta({ ...DEFAULT_META, ...data.meta });
-  if (data.trip) saveTrip(data.trip);
+  saveMeta({ ...DEFAULT_META, ...data.meta });
   return true;
 }
 
-/** 進捗のみ消す。出発日の設定は残す */
 export function resetProgress() {
-  localStorage.removeItem(CARDS_KEY);
   localStorage.removeItem(META_KEY);
-}
-
-export function resetAll() {
-  resetProgress();
-  localStorage.removeItem(TRIP_KEY);
 }

@@ -1,9 +1,9 @@
-import * as srs from './srs.js';
+import * as session from './session.js';
 import * as store from './store.js';
 import * as audio from './audio.js';
 
 // 画面の不具合がキャッシュ由来かを切り分けるための版番号。コードを変えたら上げる
-const APP_VERSION = 'phase1-r6';
+const APP_VERSION = 'simple-r1';
 
 const SCENE_LABELS = {
   greet: 'あいさつ',
@@ -24,101 +24,31 @@ const state = {
   today: null,
   phrases: [],
   byId: {},
-  cards: {},
   meta: null,
-  trip: null,     // { departure: 'YYYY-MM-DD' } 端末のlocalStorageにのみ保存する
-  queue: [],      // [{id, kind: 'review'|'new'}]
+  queue: [],      // 出題するID配列。「だめ」を押すと末尾に同じIDが積まれる
   index: 0,
   revealed: false,
   slow: false,
-  session: null,
+  ngIds: null,    // Set<string> その回に一度でも「だめ」を押したID
 };
-
-// ---- 基準日 ----
-
-function resolveToday() {
-  const q = new URLSearchParams(location.search).get('today');
-  if (q && /^\d{4}-\d{2}-\d{2}$/.test(q)) return q;
-  return srs.isoFromDate(new Date());
-}
 
 // ---- 画面切替 ----
 
 function show(name) {
-  ['setup', 'home', 'session', 'done', 'settings'].forEach((s) => {
+  ['home', 'session', 'done', 'settings'].forEach((s) => {
     $(`screen-${s}`).classList.toggle('hidden', s !== name);
   });
-}
-
-// ---- 初回セットアップ ----
-
-/**
- * 出発日を保存する。妥当でなければエラー文を返し、成功なら null を返す。
- * 出発日をソースに持たないため、この入力が唯一の設定経路になる。
- */
-function applyDeparture(value) {
-  const trip = { departure: value };
-  if (!srs.isValidTrip(trip)) return '出発日を選んでください';
-  if (srs.diffDays(state.today, value) <= 0) return '出発日は明日以降にしてください';
-
-  state.trip = trip;
-  store.saveTrip(trip);
-  return null;
-}
-
-function showSetup() {
-  $('input-departure').value = state.trip ? state.trip.departure : '';
-  $('setup-error').classList.add('hidden');
-  show('setup');
 }
 
 // ---- ホーム ----
 
 function renderHome() {
-  const left = srs.daysUntilDeparture(state.today, state.trip);
-  const mode = srs.modeFor(state.today, state.trip);
-
-  $('days-left').textContent = left > 0 ? left : 0;
-  $('streak').textContent = state.meta.streak || 0;
-
-  const retained = Object.values(state.cards).filter(srs.isRetained).length;
-  $('retained').textContent = retained;
   $('total').textContent = state.phrases.length;
-  $('progress').style.width = `${(retained / state.phrases.length) * 100}%`;
+  $('streak').textContent = state.meta.streak || 0;
+  $('sessions').textContent = state.meta.totalSessions || 0;
 
-  // ボタンは常に1つ。その日の必須分が残っていればそれを、終わっていれば再挑戦を出す。
-  // 「完了」で操作を打ち切らない。区切りを宣言させないため。
-  const doneToday = state.meta.lastDone === state.today;
-  const s = srs.buildSession(state.today, state.cards, state.phrases, state.trip);
-  const pending = s.reviewIds.length + s.newIds.length;
-  const replayCount =
-    mode === 'trip' ? 0 : srs.buildReplay(state.today, state.cards).length;
-
-  $('btn-start').disabled = false;
-
-  if (mode === 'trip') {
-    $('departure-note').textContent = '旅行中';
-    $('days-left').textContent = '0';
-    $('btn-start').textContent = '旅行モードは次のフェーズで実装';
-    $('btn-start').disabled = true;
-    $('home-today').textContent = '';
-  } else if (pending > 0) {
-    $('btn-start').textContent = '今日の10分をはじめる';
-    const parts = [];
-    if (s.reviewIds.length) parts.push(`復習 ${s.reviewIds.length}`);
-    if (s.newIds.length) parts.push(`新規 ${s.newIds.length}`);
-    const modeLabel = mode === 'sweep' ? '最終スイープ' : null;
-    $('home-today').textContent = [modeLabel, parts.join(' / ')].filter(Boolean).join('・');
-  } else if (replayCount > 0) {
-    $('btn-start').textContent = `もう一度やる（${replayCount}枚）`;
-    $('home-today').textContent = doneToday
-      ? '今日の分は完了。何回でも復習できる'
-      : '今日の新規は出しきった。復習は何回でもできる';
-  } else {
-    $('btn-start').textContent = '今日の出題はなし';
-    $('btn-start').disabled = true;
-    $('home-today').textContent = '';
-  }
+  $('home-today').textContent =
+    state.meta.lastDone === state.today ? '今日はもう確認した' : 'まだ今日の確認をしていない';
 
   const warn = audio.warningText();
   $('audio-warning').textContent = warn || '';
@@ -127,51 +57,32 @@ function renderHome() {
 
 // ---- セッション ----
 
+/** 日付に関係なく、毎回すべてのフレーズをシャッフルして出す */
 function startSession() {
-  const s = srs.buildSession(state.today, state.cards, state.phrases, state.trip);
-  state.session = s;
-  state.isReplay = false;
-  state.queue = [
-    ...s.reviewIds.map((id) => ({ id, kind: 'review' })),
-    ...s.newIds.map((id) => ({ id, kind: 'new' })),
-  ];
+  state.queue = session.buildSession(state.phrases);
   state.index = 0;
+  state.ngIds = new Set();
 
   if (state.queue.length === 0) return;
   show('session');
   renderCard();
 }
 
-/** その日の分をもう一度。新規は投入せず、今日さわったカードだけを出す */
-function startReplay() {
-  const ids = srs.buildReplay(state.today, state.cards);
-  if (ids.length === 0) return;
-
-  state.session = { reviewIds: ids, newIds: [], overflow: 0 };
-  state.isReplay = true;
-  state.queue = ids.map((id) => ({ id, kind: 'review' }));
-  state.index = 0;
-
-  show('session');
-  renderCard();
-}
-
-function currentItem() {
+function currentId() {
   return state.queue[state.index];
 }
 
 function renderCard() {
-  const item = currentItem();
-  const p = state.byId[item.id];
+  const p = state.byId[currentId()];
 
-  state.revealed = item.kind === 'new';
+  state.revealed = false;
   state.slow = false;
+  $('btn-slow').textContent = 'ゆっくり';
 
   // 「だめ」で末尾に再出題されるとキューが伸びるため、分母は常に現在のキュー長を使う
   const total = state.queue.length;
   $('session-progress').style.width = `${(state.index / total) * 100}%`;
-  const stage = item.kind === 'new' ? '新規' : state.isReplay ? '再挑戦' : '復習';
-  $('session-stage').textContent = `${stage} ${state.index + 1}/${total}`;
+  $('session-stage').textContent = `${state.index + 1}/${total}`;
 
   $('card-scene').textContent = SCENE_LABELS[p.scene] || p.scene;
   $('card-jp').textContent = p.jp;
@@ -180,12 +91,9 @@ function renderCard() {
   $('card-it').textContent = p.it;
   $('card-note').textContent = p.note;
 
-  $('card-back').classList.toggle('hidden', !state.revealed);
-  $('btn-reveal').classList.toggle('hidden', state.revealed);
-  $('grade-row').classList.toggle('hidden', item.kind === 'new' || !state.revealed);
-  $('btn-next').classList.toggle('hidden', item.kind !== 'new');
-
-  if (state.revealed) audio.speak(p, 1.0);
+  $('card-back').classList.add('hidden');
+  $('btn-reveal').classList.remove('hidden');
+  $('grade-row').classList.add('hidden');
 }
 
 function reveal() {
@@ -194,29 +102,21 @@ function reveal() {
   $('card-back').classList.remove('hidden');
   $('btn-reveal').classList.add('hidden');
   $('grade-row').classList.remove('hidden');
-  audio.speak(state.byId[currentItem().id], 1.0);
+  audio.speak(state.byId[currentId()], 1.0);
 }
 
+/**
+ * 採点は次回以降の予定に影響しない（毎日全フレーズ出す）。
+ * 「だめ」はそのセッションの末尾に同じフレーズを積むためだけに使う。
+ */
 function grade(g) {
-  const item = currentItem();
-  if (item.kind !== 'review' || !state.revealed) return;
+  if (!state.revealed) return;
 
-  const card = state.cards[item.id];
-  state.cards[item.id] = srs.nextState(card, g, state.today);
-  store.saveCards(state.cards);
-
-  // だめ だったカードは当日セッションの末尾に再出題する
+  const id = currentId();
   if (g === 'again') {
-    state.queue.push({ id: item.id, kind: 'review' });
+    state.ngIds.add(id);
+    state.queue.push(id);
   }
-  advance();
-}
-
-function nextNew() {
-  const item = currentItem();
-  if (item.kind !== 'new') return;
-  state.cards[item.id] = srs.introduce(item.id, state.today);
-  store.saveCards(state.cards);
   advance();
 }
 
@@ -231,36 +131,20 @@ function advance() {
 }
 
 function finishSession() {
-  // 1枚も出題していないセッションでストリークを加算しない
-  if (state.queue.length > 0) {
-    state.meta = store.recordSession(state.meta, state.today, srs.addDays(state.today, -1));
-  }
-  const meta = state.meta;
+  state.meta = store.recordSession(
+    state.meta,
+    state.today,
+    session.addDays(state.today, -1)
+  );
 
-  $('done-streak').textContent = meta.streak || 0;
+  $('done-streak').textContent = state.meta.streak || 0;
+  $('done-summary').textContent = `全 ${state.phrases.length} フレーズ確認`;
 
-  const s = state.session || { reviewIds: [], newIds: [], overflow: 0 };
-  const parts = [];
-  if (s.reviewIds.length) {
-    parts.push(`${state.isReplay ? '再挑戦' : '復習'} ${s.reviewIds.length}枚`);
-  }
-  if (s.newIds.length) parts.push(`新規 ${s.newIds.length}枚`);
-  $('done-summary').textContent = parts.length ? parts.join(' / ') : '今日の出題はありませんでした';
-
-  // 今日1回でも間違えたカードは、あとで正解しても明日また出る
-  const carry = Object.values(state.cards).filter(
-    (c) => c.gradedOn === state.today && c.dayWorst === 'again'
-  ).length;
-  $('done-carry').classList.toggle('hidden', carry === 0);
-  if (carry > 0) {
-    $('done-carry').textContent = `間違えた ${carry}枚は明日また出ます`;
-  }
-
-  // 150枚を1日30枚で回す以上、詰まる日は出る。失敗ではないので中立に伝える
-  const hasOverflow = (s.overflow || 0) > 0;
-  $('done-overflow').classList.toggle('hidden', !hasOverflow);
-  if (hasOverflow) {
-    $('done-overflow').textContent = `残り ${s.overflow}枚は明日にまわしました`;
+  const ng = [...state.ngIds];
+  $('done-carry').classList.toggle('hidden', ng.length === 0);
+  if (ng.length > 0) {
+    const list = ng.map((id) => state.byId[id].pt).join(' / ');
+    $('done-carry').textContent = `つまずいた ${ng.length}枚: ${list}`;
   }
 
   show('done');
@@ -286,54 +170,18 @@ function renderSettings() {
     ? `端末の音声: ${voices.join(' , ')}`
     : '端末の音声: なし';
 
-  const cards = Object.values(state.cards);
-  const boxes = [1, 2, 3, 4, 5].map(
-    (b) => `箱${b}:${cards.filter((c) => (c.box || 1) === b).length}`
-  );
   $('progress-detail').textContent =
-    `投入 ${cards.length}/${state.phrases.length} / ${boxes.join(' ')} / ` +
-    `連続 ${state.meta.streak || 0}日 / セッション ${state.meta.totalSessions || 0}回`;
-
-  $('input-departure-edit').value = state.trip ? state.trip.departure : '';
-  $('btn-departure-save').textContent = '出発日を保存';
+    `フレーズ ${state.phrases.length}件 / 連続 ${state.meta.streak || 0}日 / ` +
+    `のべ ${state.meta.totalSessions || 0}回`;
 
   $('app-version').textContent = APP_VERSION;
-  $('today-value').textContent = state.today;
-  $('mode-value').textContent = {
-    study: '学習',
-    sweep: '最終スイープ',
-    trip: '旅行',
-  }[srs.modeFor(state.today, state.trip)];
 }
 
 // ---- 配線 ----
 
 function wire() {
-  $('btn-setup-save').addEventListener('click', () => {
-    const err = applyDeparture($('input-departure').value);
-    if (err) {
-      $('setup-error').textContent = err;
-      $('setup-error').classList.remove('hidden');
-      return;
-    }
-    renderHome();
-    show('home');
-  });
-
-  $('btn-departure-save').addEventListener('click', () => {
-    const err = applyDeparture($('input-departure-edit').value);
-    $('btn-departure-save').textContent = err || '保存しました';
-    if (!err) renderSettings();
-  });
-
-  // 必須分が残っていれば通常セッション、終わっていれば再挑戦へ
-  $('btn-start').addEventListener('click', () => {
-    const s = srs.buildSession(state.today, state.cards, state.phrases, state.trip);
-    if (s.reviewIds.length + s.newIds.length > 0) startSession();
-    else startReplay();
-  });
+  $('btn-start').addEventListener('click', startSession);
   $('btn-reveal').addEventListener('click', reveal);
-  $('btn-next').addEventListener('click', nextNew);
 
   document.querySelectorAll('.grade').forEach((b) => {
     b.addEventListener('click', () => grade(b.dataset.grade));
@@ -341,14 +189,14 @@ function wire() {
 
   $('btn-replay').addEventListener('click', (e) => {
     e.stopPropagation();
-    audio.speak(state.byId[currentItem().id], state.slow ? 0.75 : 1.0);
+    audio.speak(state.byId[currentId()], state.slow ? 0.75 : 1.0);
   });
 
   $('btn-slow').addEventListener('click', (e) => {
     e.stopPropagation();
     state.slow = !state.slow;
     $('btn-slow').textContent = state.slow ? '標準の速さ' : 'ゆっくり';
-    audio.speak(state.byId[currentItem().id], state.slow ? 0.75 : 1.0);
+    audio.speak(state.byId[currentId()], state.slow ? 0.75 : 1.0);
   });
 
   $('btn-quit').addEventListener('click', () => {
@@ -396,10 +244,7 @@ function wire() {
     if (!file) return;
     try {
       store.importJSON(await file.text());
-      state.cards = store.loadCards();
       state.meta = store.loadMeta();
-      const trip = store.loadTrip();
-      if (srs.isValidTrip(trip)) state.trip = trip;
       renderSettings();
       alert('読み込みました');
     } catch (err) {
@@ -409,9 +254,8 @@ function wire() {
   });
 
   $('btn-reset').addEventListener('click', () => {
-    if (!confirm('進捗をすべて消します。元に戻せません。')) return;
+    if (!confirm('連続日数とのべ回数を消します。元に戻せません。')) return;
     store.resetProgress();
-    state.cards = {};
     state.meta = store.loadMeta();
     renderSettings();
   });
@@ -419,19 +263,16 @@ function wire() {
   // Macでのキーボード操作
   document.addEventListener('keydown', (e) => {
     if ($('screen-session').classList.contains('hidden')) return;
-    const item = currentItem();
-    if (!item) return;
+    if (!currentId()) return;
 
     if (e.key === ' ' || e.key === 'Enter') {
       e.preventDefault();
-      if (item.kind === 'new') nextNew();
-      else if (!state.revealed) reveal();
+      if (!state.revealed) reveal();
       return;
     }
-    if (item.kind === 'review' && state.revealed) {
+    if (state.revealed) {
       if (e.key === '1') grade('again');
-      if (e.key === '2') grade('vague');
-      if (e.key === '3') grade('good');
+      if (e.key === '2') grade('good');
     }
   });
 }
@@ -439,12 +280,8 @@ function wire() {
 // ---- 起動 ----
 
 async function main() {
-  state.today = resolveToday();
-  state.cards = store.loadCards();
+  state.today = session.isoFromDate(new Date());
   state.meta = store.loadMeta();
-
-  const trip = store.loadTrip();
-  state.trip = srs.isValidTrip(trip) ? trip : null;
 
   const res = await fetch('data/phrases.json', { cache: 'no-cache' });
   const data = await res.json();
@@ -452,13 +289,6 @@ async function main() {
   state.byId = Object.fromEntries(state.phrases.map((p) => [p.id, p]));
 
   wire();
-
-  // 出発日が未設定なら学習画面を出さずに入力を求める
-  if (!state.trip) {
-    showSetup();
-    await audio.init();
-    return;
-  }
 
   renderHome();
   show('home');
